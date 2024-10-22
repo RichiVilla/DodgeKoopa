@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Chat WebSocket y Tablero</title>
+    <style>
+        body {
+            display: flex;
+            flex-direction: row;
+            justify-content: center;
+            align-items: flex-start;
+            margin: 20px;
+        }
+        #grid {
+            display: grid;
+            grid-template-columns: repeat(11, 50px);
+            grid-template-rows: repeat(10, 50px);
+            gap: 2px;
+            border: 2px solid gray;
+            margin-right: 20px;
+        }
+        .cell {
+            width: 50px;
+            height: 50px;
+            border: 1px solid gray;
+            background-color: lightblue;
+            position: relative;
+        }
+        .obstacle {
+            background-color: black;
+        }
+        .player {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+        }
+        #chatContainer {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        #chat {
+            width: 300px;
+            height: 200px;
+            margin-bottom: 20px;
+            resize: none;
+            overflow-y: auto;
+        }
+        #messageContainer {
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+        }
+        #message {
+            width: 200px;
+            margin-right: 10px;
+        }
+        #readyButton {
+            margin-top: 10px;
+        }
+        #countdown {
+            font-size: 24px;
+            font-weight: bold;
+            margin-top: 10px;
+            display: none; /* Oculto por defecto hasta que comience el conteo */
+        }
+        #usernameContainer {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        #username {
+            margin-top: 10px;
+            margin-bottom: 10px;
+        }
+        #playerName {
+            font-weight: bold;
+            margin-bottom: 10px; /* Espaciado entre el nombre y el cuadro de texto */
+        }
+    </style>
+    <script>
+        let username = ""; // Variable para almacenar el nombre del usuario
+        const gridCells = [];
+        let playerPosition = -1; // Para rastrear la posición actual del jugador
+        let playerColor = ""; // Color del jugador
+        let socket;
+        let canMove = false; // Los jugadores no pueden moverse hasta que el conteo termine
+        const players = {}; // Objeto para rastrear a todos los jugadores y sus posiciones
+        const obstacles = []; // Array para almacenar las posiciones de los obstáculos (columna central)
+        const readyPlayers = new Set(); // Para rastrear los jugadores que han hecho clic en "Listo"
+        let countdownValue = 10; // Valor inicial del conteo regresivo
+        let countdownInterval; // Intervalo del conteo
+let totalPlayersReady = 0; // Para rastrear cuántos jugadores están listos
+let totalPlayers = 0; // Inicializa la variable totalPlayers
+
+       function setUsername() {
+    const nameInput = document.getElementById("username");
+    username = nameInput.value;
+    playerColor = getRandomColor(); // Obtener un color aleatorio para el jugador
+    document.getElementById("usernameContainer").style.display = "none"; // Ocultar el contenedor de nombre
+    document.getElementById("playerName").textContent = `Jugador: ${username}`; // Mostrar el nombre del jugador
+    addPlayerToGrid(); // Añadir al jugador al tablero
+
+    // Incrementar el conteo total de jugadores
+    totalPlayers++; // Aumentar el número total de jugadores
+
+    // Notificar al servidor que un nuevo jugador se ha unido
+    const newPlayerUpdate = {
+        username: username,
+        totalPlayers: totalPlayers // Enviar la cantidad total de jugadores al servidor
+    };
+    socket.send(JSON.stringify(newPlayerUpdate)); // Enviar la información al servidor
+}
+
+
+
+        function createGrid() {
+            const gridContainer = document.getElementById("grid");
+            for (let i = 0; i < 110; i++) { // 11x10 = 110 celdas
+                const cell = document.createElement("div");
+                cell.className = "cell";
+
+                // Si es la columna central, marcarla como obstáculo
+                if (i % 11 === 5) {
+                    cell.classList.add("obstacle");
+                    obstacles.push(i); // Agregar la posición al array de obstáculos
+                }
+
+                gridCells.push(cell);
+                gridContainer.appendChild(cell);
+            }
+        }
+
+        function addPlayerToGrid() {
+            let initialPosition;
+            do {
+                initialPosition = Math.floor(Math.random() * 110); // Posición aleatoria en el tablero
+            } while (isPositionOccupied(initialPosition) || isObstacle(initialPosition)); // Asegurar que no haya otro jugador o obstáculo
+
+            playerPosition = initialPosition;
+            players[username] = { position: playerPosition, color: playerColor }; // Guardar la posición y color del jugador
+            updateGrid(); // Actualizar el tablero con la posición inicial del jugador
+            notifyPlayerPosition(); // Notificar la posición del jugador a otros
+        }
+
+        function movePlayer(direction) {
+            if (!canMove) return; // Evitar el movimiento hasta que el conteo termine
+
+            let newPosition = playerPosition;
+
+            switch (direction) {
+                case 'ArrowUp':
+                    if (playerPosition >= 11) newPosition -= 11; // Mover hacia arriba
+                    break;
+                case 'ArrowDown':
+                    if (playerPosition < 99) newPosition += 11; // Mover hacia abajo
+                    break;
+                case 'ArrowLeft':
+                    if (playerPosition % 11 !== 0) newPosition -= 1; // Mover hacia la izquierda
+                    break;
+                case 'ArrowRight':
+                    if (playerPosition % 11 !== 10) newPosition += 1; // Mover hacia la derecha
+                    break;
+                default:
+                    return; // No mover si la tecla no es una flecha
+            }
+
+            // Si la nueva posición no está ocupada por un jugador o un obstáculo, actualizamos
+            if (newPosition !== playerPosition && !isPositionOccupied(newPosition) && !isObstacle(newPosition)) {
+                players[username].position = newPosition; // Actualizar la nueva posición del jugador en el objeto
+                playerPosition = newPosition; // Actualizar la posición
+                updateGrid(); // Actualizar la cuadrícula
+                notifyPlayerPosition(); // Notificar la nueva posición a los otros jugadores
+            }
+        }
+
+        function notifyPlayerPosition() {
+            const positionUpdate = {
+                username: username,
+                position: playerPosition,
+                color: playerColor
+            };
+            socket.send(JSON.stringify(positionUpdate)); // Enviar la nueva posición a todos los jugadores
+        }
+
+        function receivePlayerPosition(data) {
+            const { username, position, color } = data;
+            players[username] = { position: position, color: color }; // Actualizar la posición de otros jugadores
+            updateGrid(); // Actualizar el tablero con la nueva posición
+        }
+
+        function updateGrid() {
+            // Limpiar todas las celdas
+            gridCells.forEach(cell => {
+                cell.innerHTML = "";
+            });
+
+            // Colocar a todos los jugadores en sus posiciones correspondientes
+            Object.keys(players).forEach(playerUsername => {
+                const { position, color } = players[playerUsername];
+                if (position >= 0 && position < gridCells.length) { // Asegurarse de que la posición es válida
+                    const cell = gridCells[position];
+                    const playerDiv = document.createElement("div");
+                    playerDiv.className = "player";
+                    playerDiv.style.backgroundColor = color;
+                    playerDiv.setAttribute("data-username", playerUsername); // Agregar atributo para identificar al jugador
+                    cell.appendChild(playerDiv);
+                }
+            });
+        }
+
+        function getRandomColor() {
+            const letters = '0123456789ABCDEF';
+            let color = '#';
+            for (let i = 0; i < 6; i++) {
+                color += letters[Math.floor(Math.random() * 16)];
+            }
+            return color; // Generar un color aleatorio
+        }
+
+        function isPositionOccupied(position) {
+            // Verificar si alguna de las posiciones de los jugadores ya ocupa esta posición
+            return Object.values(players).some(player => player.position === position);
+        }
+
+        function isObstacle(position) {
+            // Verificar si la posición es una casilla negra (obstáculo)
+            return obstacles.includes(position);
+        }
+
+        function sendMessage() {
+            const messageInput = document.getElementById("message");
+            const message = messageInput.value.trim(); // Eliminar espacios en blanco
+
+            if (username === "") {
+                alert("Por favor, ingresa tu nombre antes de enviar un mensaje.");
+                return;
+            }
+
+            if (message === "") return; // Evitar enviar mensajes vacíos
+
+            // Crear un objeto con el nombre y el mensaje
+            const messageObject = {
+                username: username,
+                text: message
+            };
+
+            // Verificar si el WebSocket está abierto antes de enviar
+            if (socket.readyState === WebSocket.OPEN) {
+                console.log("Enviando mensaje:", messageObject);
+                socket.send(JSON.stringify(messageObject)); // Enviar el mensaje a todos los jugadores
+            } else {
+                console.warn("WebSocket no está abierto. Estado actual: " + socket.readyState);
+            }
+
+            messageInput.value = ""; // Limpiar el campo de entrada
+        }
+
+        function receiveMessage(data) {
+            const chat = document.getElementById("chat");
+            chat.value += `${data.username}: ${data.text}\n`; // Mostrar el mensaje en el chat
+            chat.scrollTop = chat.scrollHeight; // Desplazarse hacia abajo automáticamente
+        }
+
+       function toggleReady() {
+    const readyButton = document.getElementById("readyButton");
+    if (readyPlayers.has(username)) {
+        readyPlayers.delete(username); // Si ya está listo, lo quitamos
+        readyButton.textContent = "Listo"; // Cambiar el texto a "Listo"
+        readyButton.disabled = false; // Habilitar el botón de nuevo
+    } else {
+        readyPlayers.add(username); // Agregar el jugador a los listos
+        readyButton.textContent = "No Listo"; // Cambiar el texto a "No Listo"
+        readyButton.disabled = true; // Deshabilitar el botón de este jugador
+
+        // Notificar a otros jugadores sobre el estado de "Listo"
+        const readyStatusUpdate = {
+            username: username,
+            ready: true
+        };
+        socket.send(JSON.stringify(readyStatusUpdate)); // Enviar el estado al servidor
+    }
+
+    // Actualizar el conteo de jugadores listos
+    totalPlayersReady = readyPlayers.size;
+
+    // Verificar si todos los jugadores están listos y notificar al servidor
+    if (totalPlayersReady === totalPlayers && totalPlayers > 0) { // Asegúrate de que totalPlayers sea mayor que 0
+        startCountdown(); // Iniciar el conteo si todos están listos
+    }
+}
+
+
+
+
+        function startCountdown() {
+    if (countdownInterval) clearInterval(countdownInterval); // Limpiar cualquier conteo anterior
+    document.getElementById("countdown").style.display = "block"; // Mostrar el conteo
+    countdownValue = 10; // Reiniciar el conteo
+    updateCountdownDisplay(); // Mostrar el conteo inicial
+
+    countdownInterval = setInterval(() => {
+        countdownValue--;
+        updateCountdownDisplay(); // Actualizar el conteo en la interfaz
+
+        if (countdownValue <= 0) {
+            clearInterval(countdownInterval); // Detener el conteo
+            canMove = true; // Permitir que los jugadores se muevan
+            document.getElementById("countdown").style.display = "none"; // Ocultar el conteo
+            console.log("El conteo ha terminado, los jugadores pueden moverse."); // Mostrar mensaje en consola
+        }
+    }, 1000);
+}
+
+        function updateCountdownDisplay() {
+            document.getElementById("countdown").textContent = `¡Comienza en: ${countdownValue}s!`; // Actualizar el texto del conteo
+        }
+
+        window.onload = () => {
+    createGrid(); // Crear la cuadrícula al cargar la página
+
+    // Configurar el WebSocket
+    socket = new WebSocket("ws://192.168.56.1:8081/chat");
+
+    socket.onopen = () => {
+        console.log("Conectado al servidor WebSocket");
+    };
+
+    socket.onmessage = (event) => {
+    const data = JSON.parse(event.data); // Analizar los datos recibidos
+    console.log("Datos recibidos:", data);
+
+    // Si se recibe un mensaje de texto, es un mensaje de chat
+    if (data.text) {
+        receiveMessage(data); // Mostrar el mensaje en el chat
+    } else if (data.position !== undefined) { // Si se recibe la posición de un jugador
+        receivePlayerPosition(data); // Actualizar la posición de otros jugadores
+    } else if (data.ready !== undefined) { // Si se recibe el estado de "Listo"
+        const playerUsername = data.username;
+        const readyState = data.ready;
+
+        // Actualizar el estado de los jugadores en el conjunto de listos
+        if (readyState) {
+            readyPlayers.add(playerUsername);
+        } else {
+            readyPlayers.delete(playerUsername);
+        }
+
+        // Actualizar solo el botón "Listo" del jugador correspondiente
+        if (playerUsername === username) {
+            const playerReadyButton = document.getElementById("readyButton");
+            playerReadyButton.disabled = readyState; // Deshabilitar si está listo
+        }
+
+        // Verificar si todos los jugadores están listos y comenzar el conteo
+        if (readyPlayers.size === totalPlayers) {
+            startCountdown(); // Iniciar el conteo si todos están listos
+        }
+    }
+};
+
+socket.onerror = (error) => {
+    console.error("Error en WebSocket:", error);
+};
+
+
+            socket.onmessage = (event) => {
+    const data = JSON.parse(event.data); // Analizar los datos recibidos
+    console.log("Datos recibidos:", data);
+
+    // Si se recibe un mensaje de texto, es un mensaje de chat
+    if (data.text) {
+        receiveMessage(data); // Mostrar el mensaje en el chat
+    } else if (data.position !== undefined) { // Si se recibe la posición de un jugador
+        receivePlayerPosition(data); // Actualizar la posición de otros jugadores
+    } else if (data.ready !== undefined) { // Si se recibe el estado de "Listo"
+        const playerUsername = data.username;
+        const readyState = data.ready;
+
+        // Actualizar el estado de los jugadores en el conjunto de listos
+        if (readyState) {
+            readyPlayers.add(playerUsername);
+        } else {
+            readyPlayers.delete(playerUsername);
+        }
+
+        // Actualizar solo el botón "Listo" del jugador correspondiente
+        if (playerUsername == username) { // No afectar el propio botón
+            // Aquí actualiza el botón solo del jugador correspondiente
+            const playerReadyButton = document.getElementById("readyButton");
+            playerReadyButton.disabled = readyState; // Deshabilitar si está listo
+        }
+
+        // Verificar si todos los jugadores están listos y comenzar el conteo
+        if (readyPlayers.size === totalPlayers) {
+            startCountdown(); // Iniciar el conteo si todos están listos
+        }
+    }
+};
+
+            socket.onclose = () => {
+        console.log("Conexión cerrada con el servidor WebSocket");
+    };
+
+    // Control de teclas para mover al jugador
+    document.addEventListener('keydown', (event) => {
+        movePlayer(event.key);
+    });
+};
+    </script>
+</head>
+<body>
+<div id="grid"></div>
+<div id="chatContainer">
+    <div id="playerName">Jugador: </div>
+    <div id="usernameContainer">
+        <input type="text" id="username" placeholder="Ingresa tu nombre" />
+        <button onclick="setUsername()">Unirse</button>
+    </div>
+    <textarea id="chat" readonly></textarea>
+    <div id="messageContainer">
+        <input type="text" id="message" placeholder="Escribe un mensaje" />
+        <button onclick="sendMessage()">Enviar</button>
+    </div>
+    <button id="readyButton" onclick="toggleReady()">Listo</button>
+    <div id="countdown"></div>
+</div>
+</body>
+</html>
